@@ -1,0 +1,200 @@
+name: integration-azure-tf
+
+# Deploys the Azure multi-subscription live-events integration.
+#   pull_request / push (non-trunk)  -> integration (plan)
+#   push (trunk)                     -> integration (apply)
+#   workflow_dispatch                -> choose environment + plan/destroy
+#
+# ENVIRONMENT links three things that must share a name: the GitHub Actions
+# environment, terraform/environments/<name>.tfvars, and the TFC workspace suffix
+# ($TFC_WORKSPACE_SLUG-<name>).
+#
+# TFC_WORKSPACE_SLUG and TFC_WORKSPACE_TAGS are set in the workflow env: block
+# below (not per GitHub environment) so multiple integrations can share.
+#
+# Per-environment config (Settings -> Environments -> <name>):
+#   Variables: TFC_ORGANIZATION, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#              AZURE_CLIENT_ID, PORT_CLIENT_ID
+#   Secrets:   TF_API_TOKEN, PORT_CLIENT_SECRET
+#              (+ ARM_CLIENT_SECRET when USE_AZURE_STATIC_CREDENTIALS=true)
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/integration-azure-tf.yml"
+  push:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/integration-azure-tf.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (must match a tfvars file and TFC workspace suffix)."
+        required: true
+        type: choice
+        options:
+          - integration
+          - staging
+          - production
+      mode:
+        description: "Terraform operation"
+        required: true
+        type: choice
+        options:
+          - plan
+          - destroy
+        default: plan
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: "1.15.8"
+  TF_DIR: terraform
+  TFC_WORKSPACE_SLUG: port-integration-azure
+  TFC_WORKSPACE_TAGS: port-integration
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TF_DIR }}
+
+  terraform:
+    needs: [format]
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository)
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'integration' }}
+    concurrency:
+      group: port-integration-azure-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'integration' }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'integration' }}
+      RUN_APPLY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      RUN_DESTROY: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'destroy' }}
+      # OIDC (false) vs service principal client secret (true).
+      USE_AZURE_STATIC_CREDENTIALS: "false"
+      ARM_USE_OIDC: "true"
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      TF_CLOUD_ORGANIZATION: ${{ vars.TFC_ORGANIZATION }}
+      TF_VAR_hosting_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_port_client_id: ${{ vars.PORT_CLIENT_ID }}
+      TF_VAR_port_client_secret: ${{ secrets.PORT_CLIENT_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set derived variables
+        run: |
+          set -euo pipefail
+          echo "TFVAR_FILE=environments/${ENVIRONMENT}.tfvars" >> "$GITHUB_ENV"
+          echo "TF_WORKSPACE=${TFC_WORKSPACE_SLUG}-${ENVIRONMENT}" >> "$GITHUB_ENV"
+
+      - name: Validate environment config
+        run: |
+          set -euo pipefail
+          if [ ! -f "${TF_DIR}/${TFVAR_FILE}" ]; then
+            echo "::error::Varfile not found: ${TF_DIR}/${TFVAR_FILE}"
+            exit 1
+          fi
+          missing=()
+          [ -z "${{ vars.TFC_ORGANIZATION }}" ] && missing+=(TFC_ORGANIZATION)
+          [ -z "${{ secrets.TF_API_TOKEN }}" ] && missing+=(TF_API_TOKEN)
+          [ -z "${{ vars.AZURE_TENANT_ID }}" ] && missing+=(AZURE_TENANT_ID)
+          [ -z "${{ vars.AZURE_SUBSCRIPTION_ID }}" ] && missing+=(AZURE_SUBSCRIPTION_ID)
+          [ -z "${{ vars.PORT_CLIENT_ID }}" ] && missing+=(PORT_CLIENT_ID)
+          [ -z "$TF_VAR_port_client_secret" ] && missing+=(PORT_CLIENT_SECRET)
+          if [ "$USE_AZURE_STATIC_CREDENTIALS" = "true" ]; then
+            [ -z "${{ secrets.ARM_CLIENT_SECRET }}" ] && missing+=(ARM_CLIENT_SECRET)
+          else
+            [ -z "${{ vars.AZURE_CLIENT_ID }}" ] && missing+=(AZURE_CLIENT_ID)
+          fi
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing or empty: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Azure login (OIDC)
+        if: ${{ env.USE_AZURE_STATIC_CREDENTIALS != 'true' }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set static Azure credentials
+        if: ${{ env.USE_AZURE_STATIC_CREDENTIALS == 'true' }}
+        run: |
+          set -euo pipefail
+          echo "ARM_USE_OIDC=false" >> "$GITHUB_ENV"
+          echo "ARM_CLIENT_SECRET=${{ secrets.ARM_CLIENT_SECRET }}" >> "$GITHUB_ENV"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Ensure Terraform Cloud workspace
+        id: ensure_workspace
+        uses: gossamer-labs/gha-ensure-tfc-workspace@v1.1.0
+        with:
+          tfc_token: ${{ secrets.TF_API_TOKEN }}
+          organization: ${{ vars.TFC_ORGANIZATION }}
+          workspace_name: ${{ env.TF_WORKSPACE }}
+          workspace_tags: ${{ env.TFC_WORKSPACE_TAGS }}
+          execution_mode: local
+          create_if_missing: ${{ env.RUN_DESTROY != 'true' }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Terraform validate
+        if: ${{ env.RUN_DESTROY != 'true' }}
+        run: terraform validate
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Terraform plan
+        if: ${{ env.RUN_DESTROY != 'true' }}
+        run: terraform plan -input=false -var-file="$TFVAR_FILE" -out=tfplan
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Upload Terraform plan
+        if: ${{ env.RUN_DESTROY != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan-${{ env.ENVIRONMENT }}-${{ github.run_id }}
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 3
+
+      - name: Terraform apply
+        if: ${{ env.RUN_APPLY == 'true' }}
+        run: terraform apply -input=false -auto-approve tfplan
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Terraform destroy
+        if: ${{ env.RUN_DESTROY == 'true' }}
+        run: terraform destroy -input=false -auto-approve -var-file="$TFVAR_FILE"
+        working-directory: ${{ env.TF_DIR }}
