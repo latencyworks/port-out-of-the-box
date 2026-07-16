@@ -1,0 +1,389 @@
+name: port-promote-port-cli
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT RULES
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Four GitHub Environments, decoupled from Port org slugs — the environment
+#    name is a deployment stage, not a Port org identifier:
+#      sandbox      →  not modeled by any job yet (see note below); no protection
+#      integration  →  restricted to the main branch
+#      staging      →  restricted to release tags
+#      production   →  required reviewers + release tags
+#
+# 2. Each active environment (integration, staging, production) must be configured
+#    in GitHub Settings → Environments:
+#      Secrets:    PORT_CLIENT_SECRET
+#      Variables:  PORT_CLIENT_ID, PORT_ORG_NAME, PORT_API_URL
+#                  (PORT_ORG_NAME = Port org slug this environment deploys to;
+#                   PORT_API_URL = regional API host, e.g. https://api.us.port.io/v1
+#                   or https://api.port.io/v1 for EU)
+#
+#    sandbox is intentionally not wired into any job below. When it's needed, its
+#    secrets/variables must be injected at runtime, from sandbox's
+#    own environment config — never hardcoded into the workflow.
+#
+# 3. Optional repository variable (Settings → Secrets and variables → Variables):
+#      CONFIG_PATH  — override default export path (port-config-port-cli/port-config.json)
+#
+# 4. No repo-level secrets are used. Each job references exactly one environment.
+#
+# 5. Job env (no ~/.port/config.yaml). Composite actions pass explicit CLI flags —
+#    they do not rely on port-cli's PORT_DEFAULT_ORG / default-org resolution:
+#      PORT_CLIENT_ID, PORT_CLIENT_SECRET  — from environment vars/secrets
+#      PORT_API_URL                        — from environment variable PORT_API_URL
+#      PORT_ORG_NAME                       — from environment variable PORT_ORG_NAME
+#                                         (CLI label for --target-org / --target;
+#                                          the live Port org is whatever the
+#                                          credentials belong to)
+#
+#    port-cli-import  → --target-org + --client-id/--client-secret/--api-url
+#    port-cli-compare → --target + --target-client-id/--target-client-secret
+#                       (when target is a live org, not a file)
+#
+# Shared steps live in .github/actions/ (port-cli-setup, port-cli-compare, port-cli-import).
+#
+# TRIGGER → OPERATION MATRIX
+# ─────────────────────────────────────────────────────────────────────────────
+# The repo-committed JSON export ($CONFIG_PATH) is the single source of truth.
+# There are two independent, trigger-driven flows over that same file:
+#
+#   Promote Port config → Integration
+#   ─────────────────────────────────
+#   pull_request        → compare-pr    (preview: PR config vs base branch config,
+#                                        post PR comment; NO credentials — runs
+#                                        untrusted PR code, so it holds no secret)
+#   push to main        → compare-int   (diff log: config vs live int; credentialed)
+#                       + import-int    (auto-import config → int, no approval)
+#   workflow_dispatch   → compare-int   (manual diff check: config vs live int)
+#                       + import-int    (only if import=true input)
+#
+#   Promote Port config → Staging → Production
+#   ──────────────────────────────────────────
+#   release: published  → compare-stg   (diff: config vs stg)
+#                       + import-stg    (auto-import config → stg, no approval)
+#                       + test-stg      (convergence check + extension point for tests)
+#                       + import-prd    (requires test-stg success + human approval)
+#                                         compare config vs prd, then import → prd
+#
+# Job ids/concurrency groups keep the short int/stg/prd suffix
+# abbreviations congruent with integration/staging/production.
+#
+# SOURCE ARTIFACT
+# ─────────────────────────────────────────────────────────────────────────────
+# $CONFIG_PATH (default: `port-config-port-cli/port-config.json`), committed in repo.
+# Named for the Port account, not any one environment; orgs (int/stg/prd) are where it's deployed.
+# Devs run `port export --format json` locally and overwrite this file before committing.
+#
+# Each job checks out the repo at the commit/tag that triggered it, so the same
+# file compare-stg diffed is exactly what import-stg → test-stg → import-prd operate on.
+# Immutability comes from the git ref, not a workflow artifact.
+#
+# NOTE — import-prd gates (both required):
+#   1. needs test-stg.result == success — convergence check must pass before prd is eligible.
+#   2. production environment protection — human approval before the job runs.
+#   Compare and import are in the same job because production credentials are
+#   environment-scoped. Reviewers should examine compare-stg and test-stg output
+#   before approving. Future improvement: read-only prd token on staging to
+#   surface the prd diff in test-stg before the approval gate fires.
+#
+# SETUP CHECKLIST (one-time, in GitHub repository settings)
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Create three Environments: integration, staging, production
+# 2. integration: restrict deployment branches to main only
+# 3. staging:     restrict deployment branches/tags to release tags (tag pattern v*)
+# 4. production:  add required reviewers; restrict to release tags (tag pattern v*)
+# 5. integration/staging/production → add secret PORT_CLIENT_SECRET and variables
+#    PORT_CLIENT_ID, PORT_ORG_NAME, PORT_API_URL (per-environment; set US or EU API host
+#    as needed for that org's region).
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    paths:
+      - "port-config-port-cli/**"
+      - ".github/workflows/port-promote-port-cli.yml"
+      - ".github/actions/port-cli-*/**"
+  push:
+    branches: [main]          # update if your default branch has a different name
+    paths:
+      - "port-config-port-cli/**"
+      - ".github/workflows/port-promote-port-cli.yml"
+      - ".github/actions/port-cli-*/**"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      import:
+        description: "Import config to Integration after comparing (compare-only by default)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write        # required for posting PR diff comments
+
+env:
+  PORT_CLI_VERSION: "0.3.8"
+  # The repo-committed JSON export — the single source of truth for every job below.
+  CONFIG_PATH: "${{ vars.CONFIG_PATH || 'port-config-port-cli/port-config.json' }}"
+  # Resources included in every port-cli-compare invocation below.
+  # automations omitted: compare diffs them under actions (no separate automations bucket).
+  # page-permissions omitted: port compare accepts the type but does not diff it yet;
+  COMPARE_SCOPE: "blueprints,scorecards,actions,pages,integrations,blueprint-permissions,action-permissions"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Promote → Integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # compare-pr runs untrusted PR code (the checked-out PR ref controls this
+  # workflow, the composite actions, and port-config-port-cli/**). It therefore holds NO
+  # credentials and never references an environment/secret: there is nothing for a
+  # fork or a same-repo branch PR to exfiltrate. It diffs the PR's committed config
+  # against the same file on the base branch — a pure git/file compare, no live org.
+  compare-pr:
+    name: "Compare config → base (PR preview)"
+    if: github.event_name == 'pull_request'
+    concurrency:
+      group: port-compare-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Fetch base config
+        # Retrieve the base-branch version of the config
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "${BASE_REF}"
+          git show "origin/${BASE_REF}:${CONFIG_PATH}" \
+            > /tmp/base-config.json 2>/dev/null || echo '{}' > /tmp/base-config.json
+
+      - uses: ./.github/actions/port-cli-setup
+        with:
+          require_credentials: "false"
+
+      - uses: ./.github/actions/port-cli-compare
+        with:
+          source: /tmp/base-config.json
+          target: ${{ env.CONFIG_PATH }}
+          verbose: "true"
+          summary_heading: "## Port Compare: base (`${{ github.event.pull_request.base.ref }}`) → PR"
+          summary_subheading: "**PR:** #${{ github.event.pull_request.number }} — **Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          capture_summary_file: "true"
+
+      - name: Post PR diff comment
+        # Fork PRs get a read-only GITHUB_TOKEN and cannot post comments; they still
+        # see the diff in the job summary. Only attempt the comment for same-repo PRs.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- port-promote-port-cli: compare-pr -->"
+          { echo "${MARKER}"; cat /tmp/summary.md; } > /tmp/comment-body.md
+          jq -n --rawfile body /tmp/comment-body.md '{body: $body}' > /tmp/comment.json
+
+          COMMENT_ID=$(gh api \
+            "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -1)
+
+          if [ -n "${COMMENT_ID}" ]; then
+            gh api "repos/${REPO}/issues/comments/${COMMENT_ID}" \
+              --method PATCH --input /tmp/comment.json
+          else
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              --method POST --input /tmp/comment.json
+          fi
+
+  # compare-int is credentialed (live-org diff) and therefore MUST NOT run on
+  # pull_request: those events execute untrusted PR code, which would then have
+  # PORT_CLIENT_SECRET in scope. It only runs on push/workflow_dispatch, which run
+  # trusted default-branch/dispatch code. The second clause of the guard is a
+  # redundant, self-documenting fork check written in the SAFE form — a bare
+  # `head.repo.full_name == github.repository` would null-evaluate to false on push
+  # and silently disable this job.
+  compare-int:
+    name: "Compare config → Integration"
+    if: |
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    environment: integration
+    concurrency:
+      group: port-compare-int-${{ github.run_id }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      PORT_CLIENT_ID: ${{ vars.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_ORG_NAME: ${{ vars.PORT_ORG_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: ./.github/actions/port-cli-setup
+
+      - uses: ./.github/actions/port-cli-compare
+        with:
+          source: ${{ env.CONFIG_PATH }}
+          target: ${{ env.PORT_ORG_NAME }}
+          verbose: "true"
+          summary_subheading: "**Ref:** `${{ github.ref_name }}` — **Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          capture_summary_file: "true"
+
+  import-int:
+    name: "Import config → Integration"
+    needs: [compare-int]
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.import == true)
+    environment: integration
+    concurrency:
+      group: port-import-int
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      PORT_CLIENT_ID: ${{ vars.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_ORG_NAME: ${{ vars.PORT_ORG_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: ./.github/actions/port-cli-setup
+
+      - uses: ./.github/actions/port-cli-import
+        with:
+          input_file: ${{ env.CONFIG_PATH }}
+          target_org: ${{ env.PORT_ORG_NAME }}
+          verbose: "true"
+          summary_source: ${{ env.CONFIG_PATH }}
+          summary_subheading: "**Commit:** [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Promote → Staging → Production
+# ─────────────────────────────────────────────────────────────────────────────
+
+  compare-stg:
+    name: "Compare config → Staging"
+    if: github.event_name == 'release'
+    environment: staging
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      PORT_CLIENT_ID: ${{ vars.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_ORG_NAME: ${{ vars.PORT_ORG_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/port-cli-setup
+
+      - uses: ./.github/actions/port-cli-compare
+        with:
+          source: ${{ env.CONFIG_PATH }}
+          target: ${{ env.PORT_ORG_NAME }}
+          verbose: "true"
+          summary_subheading: "**Release:** [${{ github.event.release.tag_name }}](${{ github.event.release.html_url }})"
+
+  import-stg:
+    name: "Import config → Staging"
+    needs: [compare-stg]
+    if: github.event_name == 'release'
+    environment: staging
+    concurrency:
+      group: port-import-stg
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      PORT_CLIENT_ID: ${{ vars.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_ORG_NAME: ${{ vars.PORT_ORG_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/port-cli-setup
+
+      - uses: ./.github/actions/port-cli-import
+        with:
+          input_file: ${{ env.CONFIG_PATH }}
+          target_org: ${{ env.PORT_ORG_NAME }}
+          verbose: "true"
+          summary_source: ${{ env.CONFIG_PATH }}
+          summary_subheading: "**Release:** [${{ github.event.release.tag_name }}](${{ github.event.release.html_url }})"
+
+  test-stg:
+    name: "Test Staging (convergence + extension point)"
+    needs: [import-stg]
+    if: github.event_name == 'release'
+    environment: staging
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      PORT_CLIENT_ID: ${{ vars.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_ORG_NAME: ${{ vars.PORT_ORG_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/port-cli-setup
+
+      - name: Convergence check
+        # Verifies the import fully converged — fails if any COMPARE_SCOPE resource
+        # still differs between the repo config and Staging.
+        # page-permissions is not currently diffed by port compare
+        uses: ./.github/actions/port-cli-compare
+        with:
+          source: ${{ env.CONFIG_PATH }}
+          target: ${{ env.PORT_ORG_NAME }}
+          fail_on_diff: "true"
+
+      # EXTEND: add additional Staging validation tests here.
+      # Examples: Port API reachability, specific blueprint/action existence,
+      # integration health checks, custom validation scripts.
+      - name: Additional tests
+        run: |
+          echo "Convergence check passed. Add functional tests here as needed."
+
+  import-prd:
+    name: "Import config → Production (approval required)"
+    needs: [test-stg]
+    if: github.event_name == 'release'
+    environment: production
+    concurrency:
+      group: port-import-prd
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      PORT_CLIENT_ID: ${{ vars.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_ORG_NAME: ${{ vars.PORT_ORG_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/port-cli-setup
+
+      - uses: ./.github/actions/port-cli-compare
+        with:
+          source: ${{ env.CONFIG_PATH }}
+          target: ${{ env.PORT_ORG_NAME }}
+          verbose: "true"
+          summary_subheading: "**Release:** [${{ github.event.release.tag_name }}](${{ github.event.release.html_url }})"
+
+      - uses: ./.github/actions/port-cli-import
+        with:
+          input_file: ${{ env.CONFIG_PATH }}
+          target_org: ${{ env.PORT_ORG_NAME }}
+          verbose: "true"
+          summary_source: ${{ env.CONFIG_PATH }}
+          summary_subheading: "**Release:** [${{ github.event.release.tag_name }}](${{ github.event.release.html_url }})"

@@ -1,0 +1,33 @@
+name: Port CLI setup
+description: Validate Port credentials and install port-cli.
+
+inputs:
+  require_credentials:
+    description: >-
+      When "true" (default), fail if Port credentials are missing. Set "false"
+      for credential-free flows (e.g. file-vs-file compare on untrusted PRs)
+      that only need the CLI installed, not a live-org connection.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Port credentials
+      if: inputs.require_credentials == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        missing=()
+        [ -z "${PORT_CLIENT_ID:-}"      ] && missing+=(PORT_CLIENT_ID)
+        [ -z "${PORT_CLIENT_SECRET:-}"  ] && missing+=(PORT_CLIENT_SECRET)
+        [ -z "${PORT_API_URL:-}"        ] && missing+=(PORT_API_URL)
+        if [ ${#missing[@]} -ne 0 ]; then
+          echo "::error::Missing config in ${{ github.environment }} environment: ${missing[*]}"
+          echo "Set each under Settings → Environments → ${{ github.environment }}."
+          exit 1
+        fi
+
+    - name: Install port-cli
+      shell: bash
+      run: npm install -g @port-experimental/port-cli@${PORT_CLI_VERSION:?PORT_CLI_VERSION is not set}
