@@ -1,0 +1,132 @@
+name: Terraform plan
+description: >
+  Create a Terraform plan, write a bounded step summary, and optionally fail when
+  the plan contains changes (convergence / no-drift check).
+
+inputs:
+  working_directory:
+    description: Path to the Terraform root module.
+    required: false
+    default: terraform
+  plan_file:
+    description: Relative path (within working_directory) for the binary plan.
+    required: false
+    default: tfplan
+  expect_no_changes:
+    description: >
+      When "true", run with -detailed-exitcode and fail if the plan contains changes
+      (exit code 2). Used for Staging convergence checks.
+    required: false
+    default: "false"
+  summary_heading:
+    description: Markdown heading for the step summary.
+    required: false
+    default: ""
+  summary_subheading:
+    description: Optional markdown line below the heading (e.g. release or ref link).
+    required: false
+    default: ""
+  capture_summary_file:
+    description: When true, also write the summary to /tmp/summary.md.
+    required: false
+    default: "false"
+
+outputs:
+  plan_path:
+    description: Absolute path to the binary plan file when created.
+    value: ${{ steps.plan.outputs.plan_path }}
+  has_changes:
+    description: '"true" when the plan contains changes; "false" otherwise.'
+    value: ${{ steps.plan.outputs.has_changes }}
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform plan
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        PLAN_FILE: ${{ inputs.plan_file }}
+        EXPECT_NO_CHANGES: ${{ inputs.expect_no_changes }}
+      run: |
+        set -euo pipefail
+
+        # Always use -detailed-exitcode so has_changes is accurate:
+        #   0 = success, no changes; 1 = error; 2 = success, changes present.
+        # Cap concurrency: GitHub-hosted egress hits Port rate limits / token TTL
+        # under default parallelism; 2 is a middle ground vs serial (1).
+        set +e
+        terraform plan -input=false -no-color -parallelism=2 -detailed-exitcode -out="${PLAN_FILE}" \
+          | tee /tmp/terraform-plan-output.txt
+        plan_exit=${PIPESTATUS[0]}
+        set -e
+
+        has_changes="false"
+        case "${plan_exit}" in
+          0)
+            has_changes="false"
+            ;;
+          2)
+            has_changes="true"
+            ;;
+          *)
+            echo "::error::terraform plan failed with exit code ${plan_exit}"
+            exit "${plan_exit}"
+            ;;
+        esac
+
+        plan_path="$(pwd)/${PLAN_FILE}"
+        echo "plan_path=${plan_path}" >> "${GITHUB_OUTPUT}"
+        echo "has_changes=${has_changes}" >> "${GITHUB_OUTPUT}"
+
+        # Human-readable copy for summaries (bounded later).
+        terraform show -no-color "${PLAN_FILE}" > /tmp/terraform-plan-show.txt
+
+        if [ "${EXPECT_NO_CHANGES}" = "true" ] && [ "${has_changes}" = "true" ]; then
+          echo "::error::Expected no Terraform changes after apply (convergence check failed)."
+          exit 1
+        fi
+
+    - name: Write plan summary
+      if: always()
+      shell: bash
+      env:
+        SUMMARY_HEADING: ${{ inputs.summary_heading }}
+        SUMMARY_SUBHEADING: ${{ inputs.summary_subheading }}
+        CAPTURE_SUMMARY_FILE: ${{ inputs.capture_summary_file }}
+        EXPECT_NO_CHANGES: ${{ inputs.expect_no_changes }}
+        HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
+      run: |
+        set -euo pipefail
+
+        HEADING="${SUMMARY_HEADING:-## Terraform Plan → \`${ENVIRONMENT:-unknown}\`}"
+
+        {
+          echo "${HEADING}"
+          if [ -n "${SUMMARY_SUBHEADING}" ]; then
+            echo "${SUMMARY_SUBHEADING}"
+          fi
+          if [ "${EXPECT_NO_CHANGES}" = "true" ]; then
+            echo "**Mode:** convergence check (expect no changes)"
+          else
+            echo "**Mode:** plan"
+          fi
+          if [ -n "${HAS_CHANGES:-}" ]; then
+            echo "**Has changes:** ${HAS_CHANGES}"
+          fi
+          echo ""
+          echo '```'
+          if [ -f /tmp/terraform-plan-show.txt ]; then
+            head -c 60000 /tmp/terraform-plan-show.txt
+          elif [ -f /tmp/terraform-plan-output.txt ]; then
+            head -c 60000 /tmp/terraform-plan-output.txt
+          fi
+          echo '```'
+        } > /tmp/summary-block.md
+
+        if [ "${CAPTURE_SUMMARY_FILE}" = "true" ]; then
+          cat /tmp/summary-block.md | tee /tmp/summary.md >> "${GITHUB_STEP_SUMMARY}"
+        else
+          cat /tmp/summary-block.md >> "${GITHUB_STEP_SUMMARY}"
+        fi
