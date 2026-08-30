@@ -5,4 +5,5 @@ Get to value with [Port](https://www.port.io/) faster. This repo exists to ease 
 ## Reference architectures
 
 - [`reference-architecture/port-resource-promotion/port-cli`](reference-architecture/port-resource-promotion/port-cli) — promote your Port configuration through Integration, Staging, and Production using a GitOps pipeline: review a diff on every pull request, deploy on merge, and roll out on release.
+- [`reference-architecture/port-resource-promotion/terraform`](reference-architecture/port-resource-promotion/terraform) — promote Port configuration as Terraform through the same Integration → Staging → Production ladder: plan on pull request, apply on merge, and roll out on release with Terraform Cloud state.
 - [`reference-architecture/integration/azure-tf`](reference-architecture/integration/azure-tf) — deploy Port's Azure integration on Azure Container Apps with Event Grid for real-time catalog updates across one or more subscriptions (Terraform).

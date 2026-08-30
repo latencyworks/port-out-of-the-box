@@ -1,0 +1,63 @@
+name: Terraform apply
+description: Apply a saved Terraform plan and write an always-on step summary.
+
+inputs:
+  working_directory:
+    description: Path to the Terraform root module.
+    required: false
+    default: terraform
+  plan_file:
+    description: Relative path (within working_directory) to the saved binary plan.
+    required: false
+    default: tfplan
+  summary_heading:
+    description: Markdown heading for the apply summary.
+    required: false
+    default: ""
+  summary_subheading:
+    description: Markdown line below the heading (e.g. commit or release link).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform apply
+      id: apply
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        PLAN_FILE: ${{ inputs.plan_file }}
+      run: |
+        set -euo pipefail
+        if [ ! -f "${PLAN_FILE}" ]; then
+          echo "::error::Saved plan not found: ${{ inputs.working_directory }}/${PLAN_FILE}"
+          exit 1
+        fi
+        # Match plan parallelism (see terraform-plan).
+        terraform apply -input=false -auto-approve -no-color -parallelism=2 "${PLAN_FILE}" \
+          | tee /tmp/terraform-apply-output.txt
+
+    - name: Write apply summary
+      if: always()
+      shell: bash
+      env:
+        SUMMARY_HEADING: ${{ inputs.summary_heading }}
+        SUMMARY_SUBHEADING: ${{ inputs.summary_subheading }}
+        JOB_STATUS: ${{ steps.apply.outcome }}
+      run: |
+        set -euo pipefail
+
+        HEADING="${SUMMARY_HEADING:-## Terraform Apply → \`${ENVIRONMENT:-unknown}\`}"
+
+        {
+          echo "${HEADING}"
+          echo "${SUMMARY_SUBHEADING}"
+          echo "**Mode:** apply (saved plan)"
+          echo "**Status:** ${JOB_STATUS}"
+          echo ""
+          echo '```'
+          if [ -f /tmp/terraform-apply-output.txt ]; then
+            head -c 60000 /tmp/terraform-apply-output.txt
+          fi
+          echo '```'
+        } >> "${GITHUB_STEP_SUMMARY}"

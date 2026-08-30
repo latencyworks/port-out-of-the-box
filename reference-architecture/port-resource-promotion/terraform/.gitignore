@@ -1,0 +1,26 @@
+# Local Terraform / editor artifacts — keep .terraform.lock.hcl committed.
+
+.terraform/
+.terraform.tfstate
+.terraform.tfstate.*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+tfplan
+*.tfplan
+*.tfplan.json
+
+# Import-generator bootstrap leftovers (do not promote these).
+*_imports.tf
+fix_generated.sh
+migration_report.md
+
+# OS / editor
+.DS_Store
+*.swp
+*~
