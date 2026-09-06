@@ -14,22 +14,30 @@ Keep `providers.tf` and `terraform.tf` in place. Prefer generating imports **wit
 
 The module's local provider name is **`port-labs`** (generator default). That matches what `terraform plan -generate-config-out` emits, so `generated.tf` needs no provider-name rewrite. Do **not** pass `--provider-alias port`.
 
+### Port API URL
+
+Use **`PORT_BASE_URL`** everywhere in this repo (Terraform provider, CI, auth checks). No `/v1` suffix.
+
+| Region | `PORT_BASE_URL` |
+|--------|-----------------|
+| US (`app.us.port.io`) | `https://api.us.port.io` |
+| EU (`app.port.io`) | `https://api.port.io` |
+
+[`terraform-import-generator`](https://github.com/port-experimental/terraform-import-generator) is the exception: its API client reads **`PORT_API_BASE_URL`**, not `PORT_BASE_URL`. Derive it only for the `port-tf-import` step in the bootstrap block below.
+
 ```bash
 cd terraform
 
 export PORT_CLIENT_ID=...          # Integration org machine user
 export PORT_CLIENT_SECRET=...
 export PORT_BETA_FEATURES_ENABLED=true
-# Generator auth host (defaults to EU api.getport.io if unset):
-export PORT_API_BASE_URL=https://api.us.port.io
-# Provider / other tooling (defaults to US in CI; set EU override if needed):
-# export PORT_BASE_URL=https://api.port.io
+export PORT_BASE_URL=https://api.us.port.io   # or https://api.port.io for EU
 
-# Generate imports + report only — do not pass --terraform when providers.tf exists.
-# Optional: --generate-fix-script for jq/expression quirks only (not provider names).
+# Import generator only (see Port API URL above):
+export PORT_API_BASE_URL="${PORT_BASE_URL}"
 port-tf-import -m --auto-fix --report --generate-fix-script
 
-# If terraform init below fails on a duplicate import for
+# If terraform init fails on a duplicate import for
 # port_system_blueprint._team, see Troubleshooting.
 
 # The workspace must already exist with execution_mode=local — one auto-created
@@ -43,6 +51,7 @@ port-tf-import -m --auto-fix --report --generate-fix-script
 
 # Partial cloud {} in terraform.tf needs these for local init.
 # TF_WORKSPACE must match ${TFC_WORKSPACE_SLUG}-integration from the workflow env.
+# PORT_* above must still be set in this shell for plan/apply.
 export TF_CLOUD_ORGANIZATION=...       # match GitHub Environment ${TFC_ORGANIZATION}
 export TF_WORKSPACE=...                # ${TFC_WORKSPACE_SLUG}-${ENVIRONMENT}, e.g. port-config-integration
 export TF_TOKEN_app_terraform_io=...   # workspace-scoped team token preferred
@@ -55,9 +64,11 @@ terraform plan -generate-config-out=generated.tf
 sed -i '' '/^[[:space:]]*provider[[:space:]]*=/d' *_imports.tf
 
 # Optional: ./fix_generated.sh if generated (jq_condition etc.)
-terraform apply          # imports existing Integration resources into TFC state
+
+# Import existing resources into TFC state
+terraform apply
+# Do not commit *_imports.tf, fix_generated.sh, or migration_report.md
 rm -f *_imports.tf fix_generated.sh migration_report.md
-# Do not commit *_imports.tf, migration_report.md, or fix_generated.sh
 ```
 
 ## Local development
@@ -68,6 +79,7 @@ export PORT_CLIENT_ID=...
 export PORT_CLIENT_SECRET=...
 export PORT_BETA_FEATURES_ENABLED=true
 export PORT_BASE_URL=https://api.us.port.io   # or https://api.port.io for EU
+export PORT_API_BASE_URL="${PORT_BASE_URL}"   # required by import-generator
 export TF_CLOUD_ORGANIZATION=...
 export TF_WORKSPACE=...
 export TF_TOKEN_app_terraform_io=...

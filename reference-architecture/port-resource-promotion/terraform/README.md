@@ -65,7 +65,7 @@ Enabling this project inside a fork of this catalog instead? Copy only `.github/
    - Optional: `PORT_BASE_URL` (defaults to `https://api.us.port.io`; set `https://api.port.io` for EU)
 6. **Generate and commit** `terraform/generated.tf`, then bootstrap Integration state.
    - Run the workflow once via **workflow_dispatch** first. It provisions the Integration workspace, then fails with a bootstrap notice — expected until `generated.tf` is committed.
-   - See [`terraform/README.md`](terraform/README.md) for further guidance. 
+   - See [`terraform/README.md`](terraform/README.md) for bootstrap steps. Set `PORT_BASE_URL` for Terraform; `PORT_API_BASE_URL` is only needed when running `port-tf-import` (see [Port API URL](terraform/README.md#port-api-url)).
    - See [Troubleshooting](terraform/README.md#troubleshooting).
 
 That's it. Merge to `main` promotes to Integration — you should see a plan run and an apply run for Integration under the Actions tab.
