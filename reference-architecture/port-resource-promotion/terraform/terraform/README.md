@@ -29,14 +29,13 @@ export PORT_API_BASE_URL=https://api.us.port.io
 # Optional: --generate-fix-script for jq/expression quirks only (not provider names).
 port-tf-import -m --auto-fix --report --generate-fix-script
 
-# Known generator quirk: scorecard_imports.tf may also declare
-# port_system_blueprint._team (already in blueprint_imports.tf). Delete the
-# scorecard copy before terraform init, or init will fail on duplicate import.
+# If terraform init below fails on a duplicate import for
+# port_system_blueprint._team, see Troubleshooting.
 
 # Partial cloud {} in terraform.tf needs these for local init.
 # TF_WORKSPACE must match ${TFC_WORKSPACE_SLUG}-integration from the workflow env.
-export TF_CLOUD_ORGANIZATION=...
-export TF_WORKSPACE=...            # e.g. ${TFC_WORKSPACE_SLUG}-integration
+export TF_CLOUD_ORGANIZATION=...       # match GitHub Environment ${TFC_ORGANIZATION}
+export TF_WORKSPACE=...                # ${TFC_WORKSPACE_SLUG}-${ENVIRONMENT}, e.g. port-config-integration
 export TF_TOKEN_app_terraform_io=...   # workspace-scoped team token preferred
 
 terraform init
@@ -67,3 +66,33 @@ export TF_TOKEN_app_terraform_io=...
 terraform init
 terraform plan
 ```
+
+## Troubleshooting
+
+### Duplicate import for `port_system_blueprint._team`
+
+`terraform init` right after generating imports fails with:
+
+```
+│ Error: Duplicate import configuration for "port_system_blueprint._team"
+│
+│   on scorecard_imports.tf line 2, in import:
+│    2:   to = port_system_blueprint._team
+│
+│ An import block for the resource "port_system_blueprint._team" was already declared at blueprint_imports.tf:31,1-7. A resource can have only one import block.
+```
+
+[`terraform-import-generator`](https://github.com/port-experimental/terraform-import-generator) writes the canonical `port_system_blueprint._team` import into `blueprint_imports.tf`, then writes it again at the top of `scorecard_imports.tf` when scorecards are attached to `_team`. Terraform allows only one `import` block per resource address, so init refuses both files.
+
+Delete the `_team` block from `scorecard_imports.tf` — keep the `port_scorecard.*` imports that follow it, and leave `blueprint_imports.tf` untouched:
+
+```hcl
+# scorecard_imports.tf — delete this block only
+import {
+  to = port_system_blueprint._team
+  id = "_team"
+  provider = port-labs
+}
+```
+
+Then pick the bootstrap sequence back up at `terraform init`.
