@@ -32,6 +32,15 @@ port-tf-import -m --auto-fix --report --generate-fix-script
 # If terraform init below fails on a duplicate import for
 # port_system_blueprint._team, see Troubleshooting.
 
+# The workspace must already exist with execution_mode=local — one auto-created
+# by terraform init would default to remote execution. Easiest way: run the
+# pipeline once via workflow_dispatch. It creates
+# ${TFC_WORKSPACE_SLUG}-integration, then fails with a bootstrap notice, which
+# is expected until generated.tf is committed. Creating it by hand in Terraform
+# Cloud works too. Only integration can be provisioned this way: staging and
+# production are restricted to release tags, so their workspaces are created by
+# the first release run.
+
 # Partial cloud {} in terraform.tf needs these for local init.
 # TF_WORKSPACE must match ${TFC_WORKSPACE_SLUG}-integration from the workflow env.
 export TF_CLOUD_ORGANIZATION=...       # match GitHub Environment ${TFC_ORGANIZATION}
