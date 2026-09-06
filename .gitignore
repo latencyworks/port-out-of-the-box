@@ -32,15 +32,22 @@ bin/
 *.exe
 
 ## Terraform
+# Keep .terraform.lock.hcl committed (provider checksums for reproducible runs).
 .terraform/
+.terraform.tfstate
+.terraform.tfstate.*
 *.tfstate
 *.tfstate.*
-*.tfplan
 crash.log
+crash.*.log
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+tfplan
+*.tfplan
+*.tfplan.json
+*.local.tfvars
 
 ## GitHub Actions
 # Disable if testing code directly from this repo
