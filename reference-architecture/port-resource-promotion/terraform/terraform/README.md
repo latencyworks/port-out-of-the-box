@@ -80,7 +80,7 @@ terraform plan
 
 ### Duplicate import for `port_system_blueprint._team`
 
-`terraform init` right after generating imports fails with:
+`terraform init` right after generating imports may fail with:
 
 ```
 │ Error: Duplicate import configuration for "port_system_blueprint._team"
@@ -91,17 +91,14 @@ terraform plan
 │ An import block for the resource "port_system_blueprint._team" was already declared at blueprint_imports.tf:31,1-7. A resource can have only one import block.
 ```
 
-[`terraform-import-generator`](https://github.com/port-experimental/terraform-import-generator) writes the canonical `port_system_blueprint._team` import into `blueprint_imports.tf`, then writes it again at the top of `scorecard_imports.tf` when scorecards are attached to `_team`. Terraform allows only one `import` block per resource address, so init refuses both files.
+[`terraform-import-generator`](https://github.com/port-experimental/terraform-import-generator) writes `port_system_blueprint._team` into `blueprint_imports.tf`, then writes it again at the top of `scorecard_imports.tf` when scorecards reference `_team`. Terraform allows only one `import` block per resource address.
 
-Delete the `_team` block from `scorecard_imports.tf` — keep the `port_scorecard.*` imports that follow it, and leave `blueprint_imports.tf` untouched:
+**Fix manually**
 
-```hcl
-# scorecard_imports.tf — delete this block only
-import {
-  to = port_system_blueprint._team
-  id = "_team"
-  provider = port-labs
-}
-```
+1. Open `scorecard_imports.tf` and delete the `_team` import block at the top (leave every `port_scorecard.*` block below it).
+2. Leave `blueprint_imports.tf` unchanged — that file keeps the canonical `_team` import.
+3. Re-run `terraform init` and continue the bootstrap sequence.
 
-Then pick the bootstrap sequence back up at `terraform init`.
+**Sample prompt**
+
+> `terraform init` fails with duplicate import for `port_system_blueprint._team` in `scorecard_imports.tf` and `blueprint_imports.tf`. Remove the duplicate from `scorecard_imports.tf` and keep the `port_scorecard.*` imports.
