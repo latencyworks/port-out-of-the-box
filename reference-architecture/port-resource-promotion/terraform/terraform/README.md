@@ -23,7 +23,7 @@ Use **`PORT_BASE_URL`** everywhere in this repo (Terraform provider, CI, auth ch
 | US (`app.us.port.io`) | `https://api.us.port.io` |
 | EU (`app.port.io`) | `https://api.port.io` |
 
-[`terraform-import-generator`](https://github.com/port-experimental/terraform-import-generator) is the exception: its API client reads **`PORT_API_BASE_URL`**, not `PORT_BASE_URL`. Derive it only for the `port-tf-import` step in the bootstrap block below.
+[`terraform-import-generator`](https://github.com/port-experimental/terraform-import-generator) is the exception: its API client reads **`PORT_API_BASE_URL`**, not `PORT_BASE_URL`.
 
 ```bash
 cd terraform
@@ -37,8 +37,8 @@ export PORT_BASE_URL=https://api.us.port.io   # or https://api.port.io for EU
 export PORT_API_BASE_URL="${PORT_BASE_URL}"
 port-tf-import -m --auto-fix --report --generate-fix-script
 
-# If terraform init fails on a duplicate import for
-# port_system_blueprint._team, see Troubleshooting.
+# See Troubleshooting:
+# terraform init fails on a duplicate import for port_system_blueprint._team
 
 # The workspace must already exist with execution_mode=local — one auto-created
 # by terraform init would default to remote execution. Easiest way: run the
@@ -59,15 +59,17 @@ export TF_TOKEN_app_terraform_io=...   # workspace-scoped team token preferred
 terraform init
 terraform plan -generate-config-out=generated.tf
 
-# Once generated.tf exists, Terraform forbids `provider = …` on import blocks.
-# Strip those lines from all *_imports.tf before apply:
-sed -i '' '/^[[:space:]]*provider[[:space:]]*=/d' *_imports.tf
+# Once generated.tf exists:
+./fix_generated.sh
 
-# Optional: ./fix_generated.sh if generated (jq_condition etc.)
+# Terraform forbids `provider = …` on import blocks.
+# strip those lines from all *_imports.tf before apply:
+# sed -i '' '/^[[:space:]]*provider[[:space:]]*=/d' *_imports.tf
 
 # Import existing resources into TFC state
 terraform apply
-# Do not commit *_imports.tf, fix_generated.sh, or migration_report.md
+
+# Cleanup: *_imports.tf, fix_generated.sh, migration_report.md
 rm -f *_imports.tf fix_generated.sh migration_report.md
 ```
 
