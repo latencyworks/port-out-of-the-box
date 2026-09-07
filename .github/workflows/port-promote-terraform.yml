@@ -275,7 +275,7 @@ jobs:
           capture_summary_file: "true"
 
       - name: Upload Terraform plan
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: tfplan-int-${{ github.run_id }}
           path: ${{ env.TF_WORKING_DIRECTORY }}/${{ env.TF_PLAN_FILE }}
@@ -356,7 +356,7 @@ jobs:
           tfc_organization: ${{ steps.setup.outputs.tfc_organization }}
 
       - name: Download Terraform plan
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: tfplan-int-${{ github.run_id }}
           path: ${{ env.TF_WORKING_DIRECTORY }}
@@ -418,7 +418,7 @@ jobs:
           summary_subheading: "**Release:** [${{ github.event.release.tag_name }}](${{ github.event.release.html_url }})"
 
       - name: Upload Terraform plan
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: tfplan-stg-${{ github.run_id }}
           path: ${{ env.TF_WORKING_DIRECTORY }}/${{ env.TF_PLAN_FILE }}
@@ -467,7 +467,7 @@ jobs:
           tfc_organization: ${{ steps.setup.outputs.tfc_organization }}
 
       - name: Download Terraform plan
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: tfplan-stg-${{ github.run_id }}
           path: ${{ env.TF_WORKING_DIRECTORY }}
